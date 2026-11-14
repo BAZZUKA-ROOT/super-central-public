@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: super-central-public
+    runtime: python
+    plan: free
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
