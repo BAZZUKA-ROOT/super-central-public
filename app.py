@@ -178,9 +178,10 @@ async def terms(request):
 
 async def support(request):
     return _page("Suporte — Super Central",
-                 "<p>Em preparação para publicação. Para problemas técnicos, "
-                 "consulte a página do desenvolvedor no portal OpenAI após o cadastro."
-                 " Este canal será atualizado com contato oficial antes da submissão.</p>")
+                 "<p>Para dúvidas, solicitações de suporte ou problemas técnicos, abra uma questão "
+                 "no <a href='https://github.com/BAZZUKA-ROOT/super-central-public/issues'>"
+                 "repositório oficial do Super Central no GitHub</a>.</p>"
+                 "<p>Não compartilhe senhas, chaves de API ou dados pessoais em questões públicas.</p>")
 
 async def challenge(request):
     token = os.environ.get("OPENAI_APP_VERIFICATION_TOKEN", "").strip()
