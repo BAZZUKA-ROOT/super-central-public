@@ -50,8 +50,8 @@ CATEGORIES = {
     "multimídia": ["FFmpeg", "Remotion", "processamento de áudio"],
     "segurança": ["avaliação de dependências", "inventário", "políticas de execução"],
 }
-SOURCES = {"pypi.org", "registry.npmjs.org"}
-USER_AGENT = "SuperCentralPublic/0.1"
+SOURCES = {"pypi.org", "registry.npmjs.org", "api.github.com"}
+USER_AGENT = "SuperCentralPublic/0.2"
 
 
 def _public_fetch(url: str) -> dict:
@@ -82,9 +82,11 @@ def _name(value: str) -> str:
 )
 def central_capabilities() -> dict:
     return {
-        "version": "public-preview-0.1",
+        "version": "public-preview-0.2",
         "mode": "public_catalog_only",
         "categories": CATEGORIES,
+        "public_tools": ["central_capabilities", "central_package_details",
+                         "central_github_repositories", "central_official_skill"],
         "private_files_access": False,
         "computer_control": False,
         "package_installation": False,
@@ -118,22 +120,114 @@ def central_package_details(package: str, registry: str = "pypi") -> dict:
                 "url": "https://pypi.org/project/" + urllib.parse.quote(name, safe="") + "/",
                 "installation_performed": False,
             }
-        url = "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="")
+        # /latest evita baixar o JSON completo com milhares de versões.
+        url = "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="") + "/latest"
         obj = _public_fetch(url)
-        version = obj.get("dist-tags", {}).get("latest", "")
-        entry = obj.get("versions", {}).get(version, {})
         return {
             "found": True, "registry": "npm",
             "name": str(obj.get("name", ""))[:100],
-            "version": str(version)[:50],
-            "summary": str(entry.get("description") or obj.get("description") or "")[:500],
-            "license": str(entry.get("license") or "não informada")[:100],
+            "version": str(obj.get("version") or "")[:50],
+            "summary": str(obj.get("description") or "")[:500],
+            "license": str(obj.get("license") or "não informada")[:100],
             "url": "https://www.npmjs.com/package/" + urllib.parse.quote(name, safe=""),
             "installation_performed": False,
         }
     except (OSError, ValueError, json.JSONDecodeError, urllib.error.HTTPError) as exc:
         return {"found": False, "registry": registry, "name": name,
                 "reason": type(exc).__name__, "installation_performed": False}
+
+
+
+# Fontes oficiais de skills. Nenhuma skill baixada é executada ou instalada.
+SKILL_SOURCES = {
+    "openai": ("openai", "skills", "skills/.curated"),
+    "anthropic": ("anthropics", "skills", "skills"),
+}
+
+
+@mcp.tool(
+    name="central_github_repositories",
+    description="Pesquise repositórios públicos do GitHub por palavras-chave; retorne nome, link, licença, linguagem, estrelas e descrição. Não clona nem executa códigos.",
+    annotations=READONLY_WEB,
+)
+def central_github_repositories(query: str, limit: int = 5) -> dict:
+    if not isinstance(query, str) or len(query.strip()) < 3 or len(query) > 100:
+        return {"status": "invalid_query", "results": []}
+    if any(ord(ch) < 32 for ch in query):
+        return {"status": "invalid_query", "results": []}
+    limit = max(1, min(int(limit), 10))
+    url = ("https://api.github.com/search/repositories?q=" +
+           urllib.parse.quote(query.strip(), safe="") + "&per_page=" + str(limit))
+    try:
+        data = _public_fetch(url)
+        results = []
+        for item in data.get("items", [])[:limit]:
+            results.append({
+                "name": str(item.get("full_name", ""))[:150],
+                "url": str(item.get("html_url", ""))[:300],
+                "description": str(item.get("description") or "")[:350],
+                "stars": int(item.get("stargazers_count") or 0),
+                "language": str(item.get("language") or "")[:50],
+                "license": str((item.get("license") or {}).get("spdx_id") or "não informada")[:50],
+                "archived": bool(item.get("archived", False)),
+            })
+        return {
+            "status": "ok", "results": results, "total_matches": int(data.get("total_count", 0)),
+            "disclaimer": "Resultados públicos do GitHub; licenças e segurança não foram auditadas.",
+            "installation_performed": False,
+        }
+    except (OSError, ValueError, json.JSONDecodeError, urllib.error.HTTPError) as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__,
+                "results": [], "installation_performed": False}
+
+
+@mcp.tool(
+    name="central_official_skill",
+    description="Verifique se uma Agent Skill existe nas coleções públicas oficiais OpenAI/Anthropic e retorne sua descrição e URL. Não executa ou instala a skill.",
+    annotations=READONLY_WEB,
+)
+def central_official_skill(name: str, source: str = "openai") -> dict:
+    if source not in SKILL_SOURCES:
+        return {"status": "invalid_source", "sources": list(SKILL_SOURCES)}
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,70}", name):
+        return {"status": "invalid_name"}
+    owner, repo, directory = SKILL_SOURCES[source]
+    path = directory + "/" + name + "/SKILL.md"
+    url = "https://raw.githubusercontent.com/" + owner + "/" + repo + "/main/" + path
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": USER_AGENT, "Accept": "text/plain"
+        })
+        with urllib.request.urlopen(req, timeout=7) as response:
+            if urllib.parse.urlsplit(response.url).hostname != "raw.githubusercontent.com":
+                raise ValueError("Redirecionamento não autorizado.")
+            raw = response.read(100_001)
+            if len(raw) > 100_000:
+                raise ValueError("Arquivo de skill muito grande.")
+        txt = raw.decode("utf-8-sig")
+        if not txt.startswith("---"):
+            return {"status": "invalid_format", "name": name, "source": source}
+        parts = txt.split("---", 2)
+        front = parts[1] if len(parts) >= 3 else ""
+        description = ""
+        for line in front.splitlines():
+            if line.lstrip().startswith("description:"):
+                description = line.split(":", 1)[1].strip(" '\"")[:400]
+                break
+        return {
+            "status": "found", "name": name, "source": source,
+            "description": description,
+            "url": "https://github.com/" + owner + "/" + repo + "/tree/main/" +
+                   directory + "/" + name,
+            "installation_performed": False,
+            "warning": "Metadados públicos; conteúdo não executado e segurança não auditada.",
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"status": "not_found", "name": name, "source": source}
+        return {"status": "unavailable", "name": name, "reason": "HTTP_" + str(exc.code)}
+    except (OSError, ValueError, UnicodeError) as exc:
+        return {"status": "unavailable", "reason": type(exc).__name__, "name": name}
 
 
 SITE_STYLE = """<style>body{font-family:system-ui,sans-serif;max-width:800px;margin:6vh auto;padding:1rem;line-height:1.7;background:#0b1017;color:#e4eaf0}a{color:#50cf9b}article{border:1px solid #344452;border-radius:16px;padding:1.5rem}nav{display:flex;gap:1rem;flex-wrap:wrap}</style>"""
@@ -149,14 +243,14 @@ def _page(title: str, content: str) -> HTMLResponse:
 
 async def home(request):
     return _page("Super Central", "<p>Catálogo técnico público de bibliotecas e integrações.</p>"
-                 "<p>Oferece ferramentas MCP de consulta a metadados de pacotes PyPI e npm."
+                 "<p>Oferece ferramentas MCP de consulta a pacotes PyPI/npm, repositórios públicos GitHub e skills oficiais."
                  " Esta versão não controla computadores, não acessa arquivos pessoais e não instala software.</p>"
                  "<p>Endpoint MCP: <code>/mcp</code></p>")
 
 async def privacy(request):
     return _page("Política de Privacidade — Super Central",
                  "<p>Atualização: 14/11/2026.</p>"
-                 "<p>O app recebe os nomes dos pacotes consultados e os envia a PyPI ou npm "
+                 "<p>O app recebe termos de pesquisa e nomes de pacotes ou skills e os envia a PyPI, npm ou GitHub "
                  "para recuperar metadados públicos. Não exige contas e não recebe "
                  "arquivos locais, credenciais, documentos privados ou histórico pessoal.</p>"
                  "<p>O provedor de hospedagem pode processar endereço IP, horários e logs "
